@@ -58,6 +58,9 @@ func prepareOpenAIResponsesWebsocketBody(body []byte) []byte {
 		return []byte(`{"type":"response.create","stream":true}`)
 	}
 	wsBody := stripResponsesImageGenerationTool(bytes.Clone(body))
+	// This pool owns one response lease per socket. Named ingress lanes are
+	// handled by the gateway; do not project their envelope into the provider.
+	wsBody, _ = sjson.DeleteBytes(wsBody, "stream_id")
 	wsBody, err := sjson.SetBytes(wsBody, "type", "response.create")
 	if err != nil {
 		return body

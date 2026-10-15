@@ -54,6 +54,12 @@ func ResolveCodexWebsocketTransportSessionKeyWithBody(upstreamSessionID string, 
 	}
 	clientSessionID, clientThreadID := extractClientCodexIdentity(downstreamHeaders)
 	lane := resolveCodexExecutionLane(downstreamHeaders, body, clientThreadID)
+	if streamID := gjson.GetBytes(body, "stream_id").String(); streamID != "" {
+		// Upstream leases are single-response today. Independent downstream
+		// streams therefore need independent transport slots, even when they
+		// share the same Codex thread and account affinity.
+		lane += "\x00stream=" + streamID
+	}
 	childThread := clientThreadID != "" && !(clientSessionID != "" && clientThreadID == clientSessionID)
 	if !childThread && lane == "" {
 		return upstreamSessionID

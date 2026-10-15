@@ -404,8 +404,15 @@ func TestNormalizeResponsesWebSocketClientPayload(t *testing.T) {
 
 	t.Run("rejects append", func(t *testing.T) {
 		_, _, apiErr := normalizeResponsesWebSocketClientPayload([]byte(`{"type":"response.append","model":"gpt-5.5"}`))
-		if apiErr == nil || !strings.Contains(apiErr.Message, "response.append") {
+		if apiErr == nil || apiErr.Code != api.ErrCodeUnsupportedFeature || !strings.Contains(apiErr.Message, "response.append") {
 			t.Fatalf("error = %#v, want response.append rejection", apiErr)
+		}
+	})
+
+	t.Run("rejects steer explicitly", func(t *testing.T) {
+		_, _, apiErr := normalizeResponsesWebSocketClientPayload([]byte(`{"type":"response.steer","previous_response_id":"resp_123","input":"continue"}`))
+		if apiErr == nil || apiErr.Code != api.ErrCodeUnsupportedFeature || !strings.Contains(apiErr.Message, "response.steer") {
+			t.Fatalf("error = %#v, want response.steer rejection", apiErr)
 		}
 	})
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/codex2api/api"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,4 +29,10 @@ func writeResponsesWSRecoveryError(conn *websocket.Conn, err *api.APIError) erro
 	recordResponseCacheKnownUnavailableError()
 	log.Printf("Responses WebSocket context recovery unavailable: code=%s reason=%s", err.Code, responsesWSContextReason(err))
 	return writeResponsesWSError(conn, err)
+}
+
+func writeResponsesWSRecoveryErrorForContext(c *gin.Context, conn *websocket.Conn, err *api.APIError) error {
+	recordResponseCacheKnownUnavailableError()
+	log.Printf("Responses WebSocket context recovery unavailable: code=%s reason=%s", err.Code, responsesWSContextReason(err))
+	return writeResponsesWSErrorForContext(c, conn, err)
 }

@@ -496,6 +496,8 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		CodexWSHideUpstreamErrors:         true,
 		CodexWSSilentRetryEnabled:         true,
 		CodexWSSilentMaxRetries:           2,
+		CodexWSStatelessSlots:             proxy.DefaultRuntimeSettings().CodexWSStatelessSlots,
+		CodexWSDownstreamKeepaliveSlots:   database.DefaultCodexWSDownstreamKeepaliveSlots,
 		AutoPause5hGuardBandPercent:       5,
 		AutoPause5hGuardConcurrency:       1,
 		SmartPacingMinConcurrency:         1,

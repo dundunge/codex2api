@@ -1661,7 +1661,7 @@ func TestPrepareResponsesBody_JSONObjectInjectsJSONHintWhenInputOmitsJSON(t *tes
 	}
 }
 
-func TestPrepareOpenAIResponsesBody_JSONObjectPrefixesStringInputWhenInputOmitsJSON(t *testing.T) {
+func TestPrepareOpenAIResponsesBody_NativeJSONObjectPreservesInputWhenInputOmitsJSON(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
 		"input":"return name",
@@ -1671,8 +1671,8 @@ func TestPrepareOpenAIResponsesBody_JSONObjectPrefixesStringInputWhenInputOmitsJ
 	got := PrepareOpenAIResponsesBody(raw)
 
 	input := gjson.GetBytes(got, "input").String()
-	if !strings.Contains(strings.ToLower(input), "json") || !strings.Contains(input, "return name") {
-		t.Fatalf("expected string input to include JSON hint and original input, got %q; body=%s", input, got)
+	if input != "return name" {
+		t.Fatalf("native JSON mode must preserve the original input, got %q; body=%s", input, got)
 	}
 	if gjson.GetBytes(got, "include").Exists() {
 		t.Fatalf("OpenAI Responses body should not get Codex include defaults; body=%s", got)

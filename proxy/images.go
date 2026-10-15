@@ -682,6 +682,9 @@ func responsesBodyRequestsImageGeneration(body []byte) bool {
 	}
 	for _, key := range responsesImageGenerationOptionFields {
 		value := gjson.GetBytes(body, key)
+		if key == "background" && value.Type != gjson.String {
+			continue
+		}
 		if value.Exists() && value.Type != gjson.Null {
 			return true
 		}

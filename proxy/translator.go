@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"container/list"
 	"crypto/sha256"
 	"encoding/json"
@@ -462,7 +463,7 @@ func moveTopLevelResponsesImageOptions(body map[string]any) bool {
 	modified := false
 	for _, key := range responsesImageGenerationOptionFields {
 		value, exists := body[key]
-		if !exists || value == nil {
+		if !exists || !isResponsesImageGenerationOption(key, value) {
 			continue
 		}
 		_, toolHas := toolMap[key]
@@ -692,11 +693,25 @@ func hasTopLevelResponsesImageOptions(body map[string]any) bool {
 		return false
 	}
 	for _, key := range responsesImageGenerationOptionFields {
-		if value, exists := body[key]; exists && value != nil {
+		if value, exists := body[key]; exists && isResponsesImageGenerationOption(key, value) {
 			return true
 		}
 	}
 	return false
+}
+
+func isResponsesImageGenerationOption(key string, value any) bool {
+	if value == nil {
+		return false
+	}
+	if key == "background" {
+		// Responses uses a boolean for asynchronous execution; image generation
+		// uses a string (auto/opaque/transparent). Never move that boolean into
+		// an image tool or use it to infer an image-generation request.
+		_, imageBackground := value.(string)
+		return imageBackground
+	}
+	return true
 }
 
 func isStructuredResponsesFormatType(formatType string) bool {
@@ -2292,25 +2307,35 @@ type responsesBodyPreparation struct {
 	CacheLookup          responseCacheLookupResult
 	RequiresLocalContext bool
 	Bypassed             bool
+	InputReplayConflict  bool
 }
 
 func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) responsesBodyPreparation {
 	prevID := gjson.GetBytes(rawBody, "previous_response_id").String()
 	preparation := responsesBodyPreparation{PreviousResponseID: prevID}
 	if prevID != "" {
-		currentInput := gjson.GetBytes(rawBody, "input")
-		if currentInput.IsArray() && inputHasToolCallContext(currentInput) {
-			preparation.Bypassed = true
-		} else {
-			preparation.RequiresLocalContext = currentInput.IsArray() && inputHasFunctionCallOutput(currentInput)
-			preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
+		// Codex HTTP removes previous_response_id before sending upstream. Every
+		// reference therefore needs an owner-scoped snapshot, even when the new
+		// input is plain text or also contains complete tool call/result pairs.
+		// Otherwise a cache miss silently turns a continuation into a new turn.
+		preparation.RequiresLocalContext = true
+		preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
+		if preparation.CacheLookup.Kind == responseCacheLookupHit {
+			// A new tool pair is not a replay of the parent. Skip expansion only
+			// when overlapping call IDs prove an exact, complete parent prefix.
+			preparation.Bypassed, preparation.InputReplayConflict = responsesHTTPClientReplaysParent(
+				preparation.CacheLookup.Items, gjson.GetBytes(rawBody, "input"))
 		}
+	}
+	cachedItems := preparation.CacheLookup.Items
+	if preparation.Bypassed {
+		cachedItems = nil
 	}
 	preparedBody, expandedInputRaw := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
 		forceStoreFalse:        true,
 		expandPreviousResponse: false,
 		cacheOwner:             owner,
-		cachedResponseItems:    preparation.CacheLookup.Items,
+		cachedResponseItems:    cachedItems,
 	})
 	preparation.Body = preparedBody
 	preparation.ExpandedInputRaw = expandedInputRaw
@@ -2385,6 +2410,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	var body map[string]any
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return rawBody, ""
+	}
+	if background, present := body["background"]; present && (background == nil || background == false) {
+		// Codex executes synchronously; these nullable/default values request
+		// the same behavior and need no unsupported background parameter.
+		delete(body, "background")
 	}
 	if opts.naturalImageIntent != nil {
 		// Inspect the original prompt before compatibility rewrites or automatic
@@ -2564,7 +2594,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 // without applying Codex-specific fields such as store/include/tool injection.
 func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	var body map[string]any
-	if err := json.Unmarshal(rawBody, &body); err != nil {
+	// Native schema constraints and future provider fields can contain integers
+	// beyond float64's exact range. Shape-only compatibility must preserve them.
+	decoder := json.NewDecoder(bytes.NewReader(rawBody))
+	decoder.UseNumber()
+	if !json.Valid(rawBody) || decoder.Decode(&body) != nil {
 		return rawBody
 	}
 
@@ -2579,19 +2613,20 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 				reasoning["effort"] = normalized
 				body["reasoning"] = reasoning
 			}
-		}
-	}
-	if reasoning, ok := body["reasoning"].(map[string]any); ok {
-		if effort, ok := reasoning["effort"].(string); ok {
-			if normalized := normalizeReasoningEffortForModel(effort, effortModel); normalized != "" {
-				reasoning["effort"] = normalized
-			} else {
-				delete(reasoning, "effort")
-			}
+			delete(body, "reasoning_effort")
 		}
 	}
 
-	normalizeResponsesStructuredOutputFormat(body)
+	// Codex's structured-output sanitizer is deliberately confined to a
+	// translated legacy alias. A native Responses text.format is authoritative:
+	// retain its constraints and let its provider validate JSON-mode prompting.
+	if legacy, ok := body["response_format"].(map[string]any); ok && responsesTextFormatFromResponseFormat(legacy) != nil {
+		text, _ := body["text"].(map[string]any)
+		if _, nativeFormat := text["format"]; !nativeFormat {
+			normalizeResponsesStructuredOutputFormat(body)
+		}
+		delete(body, "response_format")
+	}
 	normalizeResponsesFunctionTools(body)
 	normalizeResponsesToolChoice(body)
 	normalizeResponsesContentPartTypes(body)
@@ -3503,9 +3538,13 @@ func normalizeResponsesToolSchema(rawTool any, descDefaults map[string]string) {
 	if !ok || isReservedCodexTool(toolMap) {
 		return
 	}
-	if toolType, _ := toolMap["type"].(string); toolType != "" {
-		if defaultDesc, ok := descDefaults[toolType]; ok {
-			if desc, _ := toolMap["description"].(string); desc == "" {
+	// Defaults describe user-defined tools by name. Builtin tool types have
+	// their own wire schemas (server-executed tool_search forbids description).
+	// Explicit fields, including empty or invalid values, belong to the client.
+	toolType, _ := toolMap["type"].(string)
+	if toolType == "function" || toolType == "custom" {
+		if _, exists := toolMap["description"]; !exists {
+			if defaultDesc, ok := descDefaults[strings.TrimSpace(firstNonEmptyAnyString(toolMap["name"]))]; ok {
 				toolMap["description"] = defaultDesc
 			}
 		}

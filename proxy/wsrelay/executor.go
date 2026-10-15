@@ -182,7 +182,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 否则落到随机槽位会触发上游 "previous response not found"。
 	// 同线程上的后台副请求（request_kind=memory、guardian 子代理）另成一道，
 	// 不与用户在飞轮次同键排队；Desktop 走 HTTP 时元数据只在请求体里。
-	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, wsBody)
+	// The original envelope owns local lane isolation. Its stream_id is not a
+	// Codex backend field and has already been removed from the outbound body.
+	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, requestBody)
 	ctx = withConnectionCapacityKind(ctx, ginHeaders, wsBody)
 	var wc *WsConnection
 	var pr *PendingRequest
@@ -325,6 +327,9 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	wsBody, _ = sjson.DeleteBytes(wsBody, "prompt_cache_retention")
 	wsBody, _ = sjson.DeleteBytes(wsBody, "safety_identifier")
 	wsBody, _ = sjson.DeleteBytes(wsBody, "disable_response_storage")
+	// Downstream named lanes are multiplexed locally onto independent leases.
+	// Their routing envelope must not reach the single-response Codex socket.
+	wsBody, _ = sjson.DeleteBytes(wsBody, "stream_id")
 
 	// 3. 注入 prompt_cache_key
 	// stateless sessionID 只是连接池隔离用的一次性随机 ID，注入它会让上游

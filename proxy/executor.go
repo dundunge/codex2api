@@ -680,6 +680,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// HTTP /responses 上游不接受它（400 Unsupported parameter: type）。此处为出站
 	// 收口兜底；sjson 只删顶层路径，input[] 等嵌套 type 不受影响（issue #548）。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "stream_id")
 
 	// 3. 注入 prompt_cache_key（如果请求体中没有，且 sessionID 不为空）
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
@@ -852,6 +853,10 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	if openAIResponsesRelayUsesUpstreamWebsocket(account, requestBody) {
 		return executeOpenAIResponsesWebsocket(ctx, account, requestBody, proxyURL, headers, baseURL, apiKey)
 	}
+	// stream_id belongs to the WebSocket envelope, including when an ingress
+	// lane falls back to HTTP. Keep nested tool/input IDs untouched.
+	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "stream_id")
 
 	client := getPooledClient(account, proxyURL)
 	send := func(body []byte) (*http.Response, error) {
@@ -1054,6 +1059,8 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	}
 
 	endpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses/compact")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "stream_id")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, ErrInternalError("创建请求失败", err)
@@ -1118,6 +1125,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
 	// 顶层 type 是 WS 事件信封字段，compact HTTP 端点同样不接受，兜底删除(issue #548)。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "stream_id")
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 	// 指纹收敛：与 ExecuteRequest 同样在请求体定稿后、构造出站请求前改写
 	// client_metadata。漏掉这一步会让 compact 路径只收敛请求头、请求体仍带客户端

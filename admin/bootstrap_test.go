@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
@@ -279,5 +281,46 @@ func TestGetBootstrapStatusIssuesTokenWhenPending(t *testing.T) {
 	}
 	if len(bootstrapTokenState.token) != bootstrapTokenBytes*2 {
 		t.Fatalf("bootstrap token = %q, want %d hex chars", bootstrapTokenState.token, bootstrapTokenBytes*2)
+	}
+}
+
+func TestPostBootstrapPersistsWebSocketRetentionDefaultsAndExplicitZero(t *testing.T) {
+	for _, existingZero := range []bool{false, true} {
+		name := "fresh database"
+		if existingZero {
+			name = "existing explicit zero"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BOOTSTRAP_ALLOWED_CIDR", "none")
+			resetBootstrapGlobals(t)
+			h := &Handler{db: newTestAdminDB(t)}
+			if existingZero {
+				settings := defaultBootstrapSettings()
+				settings.CodexWSStatelessSlots = 0
+				settings.CodexWSDownstreamKeepaliveSlots = 0
+				if err := h.db.UpdateSystemSettings(context.Background(), settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			token, err := EnsureBootstrapToken()
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, _ := doBootstrap(t, newBootstrapTestEngine(t, h), bootstrapReq{remote: "127.0.0.1:40000", token: token, secret: "synthetic-bootstrap-operator"})
+			if code != http.StatusOK {
+				t.Fatalf("bootstrap status=%d", code)
+			}
+			stored, err := h.db.GetSystemSettings(context.Background())
+			if err != nil || stored == nil {
+				t.Fatalf("bootstrap settings unavailable: %v", err)
+			}
+			wantBlank, wantChat := proxy.DefaultRuntimeSettings().CodexWSStatelessSlots, database.DefaultCodexWSDownstreamKeepaliveSlots
+			if existingZero {
+				wantBlank, wantChat = 0, 0
+			}
+			if stored.CodexWSStatelessSlots != wantBlank || stored.CodexWSDownstreamKeepaliveSlots != wantChat {
+				t.Fatalf("bootstrap WS retention = blank:%d/chat:%d, want blank:%d/chat:%d", stored.CodexWSStatelessSlots, stored.CodexWSDownstreamKeepaliveSlots, wantBlank, wantChat)
+			}
+		})
 	}
 }

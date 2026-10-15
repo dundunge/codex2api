@@ -567,7 +567,7 @@ previous_response_id 连续请求
 
 Memory 模式只有 L1。已知超限/淘汰，或依赖的必需上下文缺失/过期且没有 relay 后备时，Responses/Compact 连续请求可返回 HTTP `409 response_context_unavailable`。Redis 值损坏或超过重建上限且没有 relay 后备时同样返回 409；共享后端传输故障且请求确实依赖该上下文时可返回 HTTP `503`。Redis 中未超过重建上限的上下文不会仅因超过 L1 准入预算而失败。
 
-客户端原生 Responses WebSocket 入口不执行本地 response-cache 查找，保留 `previous_response_id` 交给上游。上述预算和 409/503 语义适用于本地重建的 HTTP Responses/Compact 路径。
+客户端原生 Responses WebSocket 在健康连接上保留 `previous_response_id`，向上游发送当轮增量；原连接丢失后的恢复仍依赖完整的本地或共享快照，受上述预算、完整性和 409/503 错误语义约束。HTTP Responses/Compact 的原生 Codex 路径必须在当前归属内重建父引用；原生 OpenAI Responses relay 可保留父 ID 交给自己的上游恢复。
 
 `GET /api/admin/ops/overview` 的 `response_cache` 从一个锁内快照返回 effective/applied generation、当前/上限/高水位/最大观测条目的逻辑字节，以及本地/远程命中与未命中、过期、条数/字节淘汰、超限旁路、Memory 超限拒绝和最终 409 计数。这里的字节是保留 JSON payload 长度之和，不包含 Go 对象、LRU、allocator 或容器开销，不是 RSS 硬上限。进程内存需要结合 Linux/Docker RSS、Go `HeapAlloc` / `HeapInuse` / `HeapReleased` 和 `NumGC` 判断。
 
