@@ -20,6 +20,16 @@ import (
 // errDecompressedBodyTooLarge 表示解压后的请求体超过大小上限（解压炸弹防护）。
 var errDecompressedBodyTooLarge = errors.New("decompressed body too large")
 
+// A decoder window rejection does not establish the decoded body length.
+// Preserve that distinction instead of reporting a guessed byte count.
+type decompressedSizeError struct {
+	stage    string
+	observed int64
+}
+
+func (e *decompressedSizeError) Error() string { return errDecompressedBodyTooLarge.Error() }
+func (e *decompressedSizeError) Unwrap() error { return errDecompressedBodyTooLarge }
+
 // parseContentEncodings 解析 Content-Encoding 头，返回小写、去空白的编码列表。
 // 按 RFC 9110，多个编码按施加顺序列出，解码时需要逆序处理；identity 视为无编码。
 func parseContentEncodings(header string) []string {
@@ -92,12 +102,12 @@ func decodeContentEncodingWithMemory(data []byte, encoding string, maxSize int64
 	decoded, err := readRequestMemoryBounded(reader, maxSize, reservation, 0)
 	if err != nil {
 		if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
-			return nil, errDecompressedBodyTooLarge
+			return nil, &decompressedSizeError{stage: "decoder_window", observed: -1}
 		}
 		return nil, err
 	}
 	if int64(len(decoded)) > maxSize {
-		return nil, errDecompressedBodyTooLarge
+		return nil, &decompressedSizeError{stage: "decompressed_body", observed: int64(len(decoded))}
 	}
 	return decoded, nil
 }
@@ -179,13 +189,12 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 					return
 				}
 				if errors.Is(err, errDecompressedBodyTooLarge) {
-					c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-						"error": gin.H{
-							"message": "请求体过大",
-							"type":    "invalid_request_error",
-							"code":    "request_too_large",
-						},
-					})
+					var sizeErr *decompressedSizeError
+					if errors.As(err, &sizeErr) {
+						rejectRequestSize(c, maxSize, sizeErr.observed, sizeErr.stage, sizeErr.observed >= 0)
+					} else {
+						rejectRequestSize(c, maxSize, -1, "decompressed_body", false)
+					}
 				} else {
 					c.JSON(http.StatusBadRequest, gin.H{
 						"error": gin.H{

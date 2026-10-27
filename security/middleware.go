@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,7 @@ func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 
 func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Header("X-Codex2API-Max-Request-Body-Bytes", strconv.FormatInt(maxSize, 10))
 		// 导入端点(multipart 文件上传)走流式限制:用 MaxBytesReader 包裹 body 交给
 		// handler,不整体 ReadAll、不缓存 raw_body。避免 200MB 文件在中间件里常驻
 		// 一整份内存(handler 用 ParseMultipartForm 流式解析,>32MB 落临时文件)。
@@ -81,9 +83,7 @@ func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gi
 		}
 		limit := maxSize
 		if c.Request.ContentLength > limit {
-			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": gin.H{
-				"message": "请求体过大", "type": "invalid_request_error", "code": "request_too_large",
-			}})
+			rejectRequestSize(c, limit, c.Request.ContentLength, "content_length", false)
 			return
 		}
 		// Charge the budget as bytes actually arrive. Reserving the declared
@@ -118,14 +118,7 @@ func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gi
 
 		// Check if body exceeds max size
 		if int64(len(body)) > limit {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-				"error": gin.H{
-					"message": "请求体过大",
-					"type":    "invalid_request_error",
-					"code":    "request_too_large",
-				},
-			})
-			c.Abort()
+			rejectRequestSize(c, limit, int64(len(body)), "wire_body", true)
 			return
 		}
 

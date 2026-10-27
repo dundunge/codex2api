@@ -224,10 +224,12 @@ func TestStoredCapabilitiesUnknownAndCredentialGenerationAreConservative(t *test
 	t.Run("unknown visible account", func(t *testing.T) {
 		assertUnknown(t, h.applyStoredModelCapabilities(ctx, &database.APIKeyRow{ID: 2}, body))
 	})
-	t.Run("unknown snapshot cannot inherit source manifest", func(t *testing.T) {
+	t.Run("unknown snapshot does not erase live source manifest", func(t *testing.T) {
 		source := []byte(`{"models":[{"slug":"gpt-6-astra","use_responses_lite":true,"prefer_websockets":true,"experimental_supported_tools":["function","web_search"],"context_window":1000,"base_instructions":"retain source prompt"}]}`)
 		result := h.applyUpstreamModelCapabilities(ctx, &database.APIKeyRow{ID: 2}, source)
-		assertUnknown(t, result)
+		if !gjson.GetBytes(result, "models.0.use_responses_lite").Bool() || !gjson.GetBytes(result, "models.0.prefer_websockets").Bool() || gjson.GetBytes(result, "models.0.context_window").Int() != 1000 || gjson.GetBytes(result, "models.0.experimental_supported_tools").Raw != `["function","web_search"]` {
+			t.Fatalf("unobserved account erased live descriptor: %s", result)
+		}
 		if gjson.GetBytes(result, "models.0.base_instructions").String() != "retain source prompt" {
 			t.Fatal("gateway rewrote source instructions")
 		}
