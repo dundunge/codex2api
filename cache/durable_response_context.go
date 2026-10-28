@@ -532,10 +532,11 @@ func (s *DurableResponseContextStore) Sweep(now time.Time) (expired, evicted int
 		if len(keys) == 0 {
 			break
 		}
-		if err := s.deleteBatch(ctx, keys); err != nil {
+		deleted, err := s.deleteExpiredBatch(ctx, keys, now)
+		if err != nil {
 			return expired, evicted, err
 		}
-		expired += len(keys)
+		expired += deleted
 	}
 	target := s.maxBytes / 10 * 9
 	for {
@@ -613,6 +614,40 @@ func (s *DurableResponseContextStore) deleteBatch(ctx context.Context, keys []st
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.deleteKeysLocked(ctx, keys)
+}
+
+// Expiration candidates can be renewed after selection. Recheck expiration in
+// the delete transaction and release only the hashes of rows actually removed.
+func (s *DurableResponseContextStore) deleteExpiredBatch(ctx context.Context, keys []string, now time.Time) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	deleted := 0
+	for _, key := range keys {
+		var hashes []byte
+		switch err := tx.QueryRowContext(ctx, `DELETE FROM response_contexts
+			WHERE key = ? AND expires_at <= ? RETURNING hashes`, key, now.UnixMilli()).Scan(&hashes); {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return 0, err
+		}
+		if err := releaseDurableResponseContextHashes(ctx, tx, hashes); err != nil {
+			return 0, err
+		}
+		deleted++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 // Stats counts retained contexts and unique item bodies.
