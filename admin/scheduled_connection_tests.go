@@ -289,6 +289,10 @@ func (h *Handler) runScheduledConnectionTests(ctx context.Context, now time.Time
 		select {
 		case gate <- struct{}{}:
 		case <-ctx.Done():
+			h.finishScheduledConnectionTestSlot(key, scheduledTestRecord{
+				AccountID: plan.AccountID, ScheduledAt: now.Format(time.RFC3339),
+				Model: config.Model, Status: "failed", Error: "测试在执行前被取消",
+			})
 			return
 		}
 		wg.Add(1)
@@ -314,13 +318,7 @@ func (h *Handler) runScheduledConnectionTestSlot(parent context.Context, id int6
 				result.NextReset5hAt = reset.Format(time.RFC3339)
 			}
 		}
-		encoded, _ := json.Marshal(result)
-		finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.db.FinishMaintenanceJob(finalCtx, id, key, string(encoded)); err != nil {
-			log.Printf("[scheduled-test] 账号 %d 写记录失败", id)
-		}
-		log.Printf("[scheduled-test] %s", encoded)
+		h.finishScheduledConnectionTestSlot(key, result)
 	}()
 	// Re-read before execution so deletion/disable of an account or plan cancels queued work.
 	row, err := h.db.GetAccountByID(parent, id)
@@ -371,4 +369,14 @@ func (h *Handler) runScheduledConnectionTestSlot(parent context.Context, id int6
 	if account := h.store.FindByID(id); account != nil {
 		result.Error = sanitizeCodexTestText(result.Error, codexTestSecrets(account))
 	}
+}
+
+func (h *Handler) finishScheduledConnectionTestSlot(key string, result scheduledTestRecord) {
+	encoded, _ := json.Marshal(result)
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.db.FinishMaintenanceJob(finalCtx, result.AccountID, key, string(encoded)); err != nil {
+		log.Printf("[scheduled-test] 账号 %d 写记录失败", result.AccountID)
+	}
+	log.Printf("[scheduled-test] %s", encoded)
 }
