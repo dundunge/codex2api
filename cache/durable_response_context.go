@@ -35,8 +35,9 @@ type DurableResponseContextStore struct {
 
 	writeMu sync.Mutex
 
-	touchMu sync.Mutex
-	touched map[string]int64
+	touchMu     sync.Mutex
+	touched     map[string]int64
+	activeReads map[string]int
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -117,13 +118,14 @@ func OpenDurableResponseContextStore(path string, opts DurableResponseContextOpt
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 	s := &DurableResponseContextStore{
-		db:       db,
-		path:     path,
-		ttl:      opts.TTL,
-		maxBytes: opts.MaxBytes,
-		touched:  make(map[string]int64),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		db:          db,
+		path:        path,
+		ttl:         opts.TTL,
+		maxBytes:    opts.MaxBytes,
+		touched:     make(map[string]int64),
+		activeReads: make(map[string]int),
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
@@ -307,6 +309,8 @@ func (s *DurableResponseContextStore) GetResponseContextBounded(ctx context.Cont
 	if s.closed() {
 		return ResponseContextReadResult{}, errDurableResponseContextClosed
 	}
+	s.beginRead(key)
+	defer s.endRead(key)
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return ResponseContextReadResult{}, err
@@ -472,32 +476,86 @@ func (s *DurableResponseContextStore) recordTouch(key string) {
 	s.touchMu.Unlock()
 }
 
-func (s *DurableResponseContextStore) flushTouches() {
+func (s *DurableResponseContextStore) beginRead(key string) {
 	s.touchMu.Lock()
+	s.activeReads[key]++
+	s.touchMu.Unlock()
+}
+
+func (s *DurableResponseContextStore) endRead(key string) {
+	s.touchMu.Lock()
+	s.activeReads[key]--
+	if s.activeReads[key] == 0 {
+		delete(s.activeReads, key)
+	}
+	s.touchMu.Unlock()
+}
+
+// Called under writeMu, so drained touches cannot be hidden from another
+// maintenance transaction. The read path only holds touchMu for map updates.
+func (s *DurableResponseContextStore) takeTouches(keys []string) (map[string]int64, map[string]bool) {
+	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
 	touched := s.touched
 	s.touched = make(map[string]int64)
-	s.touchMu.Unlock()
-	if len(touched) == 0 {
-		return
+	reading := make(map[string]bool)
+	for _, key := range keys {
+		if s.activeReads[key] > 0 {
+			reading[key] = true
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), durableResponseContextWriteTimeout)
-	defer cancel()
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return
+	return touched, reading
+}
+
+func (s *DurableResponseContextStore) restoreTouches(touched map[string]int64) {
+	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	for key, at := range touched {
+		if at > s.touched[key] {
+			s.touched[key] = at
+		}
 	}
-	defer func() { _ = tx.Rollback() }()
+}
+
+func (s *DurableResponseContextStore) applyTouches(ctx context.Context, tx *sql.Tx, touched map[string]int64) error {
 	ttl := s.ttl.Milliseconds()
 	for key, at := range touched {
 		// A read keeps an active conversation alive for another full TTL.
 		if _, err := tx.ExecContext(ctx, `UPDATE response_contexts SET accessed_at = MAX(accessed_at, ?),
 			expires_at = MAX(expires_at, ?) WHERE key = ?`, at, at+ttl, key); err != nil {
-			return
+			return err
 		}
 	}
-	_ = tx.Commit()
+	return nil
+}
+
+func (s *DurableResponseContextStore) flushTouches() {
+	ctx, cancel := context.WithTimeout(context.Background(), durableResponseContextWriteTimeout)
+	defer cancel()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_ = s.flushTouchesLocked(ctx)
+}
+
+func (s *DurableResponseContextStore) flushTouchesLocked(ctx context.Context) (err error) {
+	touched, _ := s.takeTouches(nil)
+	if len(touched) == 0 {
+		return nil
+	}
+	defer func() {
+		if err != nil {
+			s.restoreTouches(touched)
+		}
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.applyTouches(ctx, tx, touched); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *DurableResponseContextStore) sweepLoop(interval time.Duration) {
@@ -537,27 +595,21 @@ func (s *DurableResponseContextStore) Sweep(now time.Time) (expired, evicted int
 			return expired, evicted, err
 		}
 		expired += deleted
+		if deleted == 0 {
+			// In-flight reads may still be renewing this batch. Try it on the
+			// next sweep rather than spinning while those readers finish.
+			break
+		}
 	}
-	target := s.maxBytes / 10 * 9
 	for {
-		stats, err := s.Stats(ctx)
+		deleted, err := s.evictLRUBatch(ctx, evicted > 0)
 		if err != nil {
 			return expired, evicted, err
 		}
-		if stats.ItemBytes <= s.maxBytes && (evicted == 0 || stats.ItemBytes <= target) {
+		if deleted == 0 {
 			break
 		}
-		keys, err := s.selectEvictionKeys(ctx, stats.ItemBytes-target)
-		if err != nil {
-			return expired, evicted, err
-		}
-		if len(keys) == 0 {
-			break
-		}
-		if err := s.deleteBatch(ctx, keys); err != nil {
-			return expired, evicted, err
-		}
-		evicted += len(keys)
+		evicted += deleted
 	}
 	if expired > 0 || evicted > 0 {
 		s.writeMu.Lock()
@@ -610,27 +662,61 @@ func (s *DurableResponseContextStore) selectEvictionKeys(ctx context.Context, ex
 	return keys, rows.Err()
 }
 
-func (s *DurableResponseContextStore) deleteBatch(ctx context.Context, keys []string) error {
+// Keep writes and flushed read touches from refreshing a selected LRU key
+// between measuring the budget, selecting candidates and deleting the batch.
+func (s *DurableResponseContextStore) evictLRUBatch(ctx context.Context, alreadyEvicted bool) (int, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.deleteKeysLocked(ctx, keys)
+	if err := s.flushTouchesLocked(ctx); err != nil {
+		return 0, err
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		return 0, err
+	}
+	target := s.maxBytes / 10 * 9
+	if stats.ItemBytes <= s.maxBytes && (!alreadyEvicted || stats.ItemBytes <= target) {
+		return 0, nil
+	}
+	keys, err := s.selectEvictionKeys(ctx, stats.ItemBytes-target)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.deleteKeysLocked(ctx, keys); err != nil {
+		return 0, err
+	}
+	return len(keys), nil
 }
 
 // Expiration candidates can be renewed after selection. Recheck expiration in
 // the delete transaction and release only the hashes of rows actually removed.
-func (s *DurableResponseContextStore) deleteExpiredBatch(ctx context.Context, keys []string, now time.Time) (int, error) {
+func (s *DurableResponseContextStore) deleteExpiredBatch(ctx context.Context, keys []string, now time.Time) (deleted int, err error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	touched, reading := s.takeTouches(keys)
+	defer func() {
+		if err != nil {
+			s.restoreTouches(touched)
+		}
+	}()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	deleted := 0
+	if err := s.applyTouches(ctx, tx, touched); err != nil {
+		return 0, err
+	}
 	for _, key := range keys {
+		// Readers registered before this snapshot may have observed a live
+		// context and not recorded their touch yet. Later reads of an expired
+		// row miss, so they cannot introduce another successful renewal.
+		if reading[key] {
+			continue
+		}
 		var hashes []byte
 		switch err := tx.QueryRowContext(ctx, `DELETE FROM response_contexts
 			WHERE key = ? AND expires_at <= ? RETURNING hashes`, key, now.UnixMilli()).Scan(&hashes); {
