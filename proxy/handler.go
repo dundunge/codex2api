@@ -4156,8 +4156,11 @@ func (h *Handler) Responses(c *gin.Context) {
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
-	turnAccountID, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
-	turnContinuationPinned := turnContinuation && turnHasBinding
+	var turnAccountID int64
+	var turnContinuationPinned bool
+	if turnContinuation && pin == nil {
+		turnAccountID, turnContinuationPinned = h.store.SessionAffinityAccountID(affinityKey)
+	}
 	quotaFailover := false
 	ruleIdentity := h.payloadRuleIdentity(c)
 	reasoningEffort := extractReasoningEffort(rawBody)
