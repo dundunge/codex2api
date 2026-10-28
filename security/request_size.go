@@ -10,6 +10,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func requestBodySizeLimit(path string, maxSize int64) int64 {
+	if MaxImportBodySize > 0 && IsLargeImportUploadPath(path) {
+		return MaxImportBodySize
+	}
+	return maxSize
+}
+
 // rejectRequestSize runs before access/usage logging and must not log bodies,
 // authorization, query strings, or client-supplied URLs.
 func rejectRequestSize(c *gin.Context, limit, observed int64, stage string, lowerBound bool) {

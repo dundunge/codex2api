@@ -112,3 +112,59 @@ func TestRequestBodyMiddlewareImportLimitHeader(t *testing.T) {
 		t.Fatalf("incorrect import limit: status=%d headers=%v", recorder.Code, recorder.Header())
 	}
 }
+
+func TestRequestBodyMiddlewareCompressedImportUsesImportLimit(t *testing.T) {
+	previous := security.MaxImportBodySize
+	security.MaxImportBodySize = 150
+	t.Cleanup(func() { security.MaxImportBodySize = previous })
+	incompressible := make([]byte, 256)
+	for i := range incompressible {
+		incompressible[i] = byte(i)
+	}
+	for _, tc := range []struct {
+		name   string
+		body   []byte
+		status int
+		stage  string
+	}{
+		{"within import limit", []byte(strings.Repeat("x", 120)), http.StatusOK, ""},
+		{"decoded size exceeds import limit", []byte(strings.Repeat("x", 160)), http.StatusRequestEntityTooLarge, "decompressed_body"},
+		{"wire size exceeds import limit", incompressible, http.StatusRequestEntityTooLarge, "wire_body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var compressed bytes.Buffer
+			zip := gzip.NewWriter(&compressed)
+			_, _ = zip.Write(tc.body)
+			if err := zip.Close(); err != nil {
+				t.Fatal(err)
+			}
+			router := gin.New()
+			configureRequestBodyMiddleware(router, 100)
+			router.POST("/api/admin/accounts/import", func(c *gin.Context) {
+				body, err := io.ReadAll(c.Request.Body)
+				if tc.status != http.StatusOK || err != nil || !bytes.Equal(body, tc.body) {
+					t.Errorf("unexpected imported body: bytes=%d err=%v", len(body), err)
+				}
+				c.Status(http.StatusOK)
+			})
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", bytes.NewReader(compressed.Bytes()))
+			request.Header.Set("Content-Encoding", "gzip")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != tc.status || recorder.Header().Get("X-Codex2API-Max-Request-Body-Bytes") != "150" {
+				t.Fatalf("status=%d header=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+			}
+			if tc.stage != "" {
+				var result struct {
+					Error struct {
+						Stage string `json:"size_stage"`
+						Limit int64  `json:"max_body_bytes"`
+					} `json:"error"`
+				}
+				if json.Unmarshal(recorder.Body.Bytes(), &result) != nil || result.Error.Stage != tc.stage || result.Error.Limit != 150 {
+					t.Fatalf("incorrect import size diagnostic: %s", recorder.Body.String())
+				}
+			}
+		})
+	}
+}

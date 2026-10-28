@@ -71,11 +71,8 @@ func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 
 func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		limit := maxSize
+		limit := requestBodySizeLimit(c.Request.URL.Path, maxSize)
 		largeImport := MaxImportBodySize > 0 && IsLargeImportUploadPath(c.Request.URL.Path)
-		if largeImport {
-			limit = MaxImportBodySize
-		}
 		c.Header("X-Codex2API-Max-Request-Body-Bytes", strconv.FormatInt(limit, 10))
 		// 导入端点(multipart 文件上传)走流式限制:用 MaxBytesReader 包裹 body 交给
 		// handler,不整体 ReadAll、不缓存 raw_body。避免 200MB 文件在中间件里常驻

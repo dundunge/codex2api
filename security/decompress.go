@@ -119,6 +119,7 @@ func decodeContentEncodingWithMemory(data []byte, encoding string, maxSize int64
 // 未知编码保持原样透传，与历史行为一致。
 func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		limit := requestBodySizeLimit(c.Request.URL.Path, maxSize)
 		encodings := parseContentEncodings(c.GetHeader("Content-Encoding"))
 		if len(encodings) == 0 {
 			c.Next()
@@ -153,13 +154,18 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 				}
 				defer reservation.Release()
 				mem = reservation
-				data, err = readRequestMemoryBounded(c.Request.Body, maxSize, reservation, 0)
+				data, err = readRequestMemoryBounded(c.Request.Body, limit, reservation, 0)
 			} else {
-				data, err = io.ReadAll(io.LimitReader(c.Request.Body, maxSize+1))
+				data, err = io.ReadAll(io.LimitReader(c.Request.Body, limit+1))
 			}
 			if err != nil {
 				if errors.Is(err, ErrRequestMemoryBudget) {
 					rejectRequestMemory(c)
+					return
+				}
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					rejectRequestSize(c, limit, maxBytesErr.Limit+1, "wire_body", true)
 					return
 				}
 				c.JSON(http.StatusBadRequest, gin.H{
@@ -173,6 +179,10 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 			}
 			body = data
 		}
+		if int64(len(body)) > limit {
+			rejectRequestSize(c, limit, int64(len(body)), "wire_body", true)
+			return
+		}
 		if len(body) == 0 {
 			c.Next()
 			return
@@ -182,7 +192,7 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 		// 多个编码按施加顺序列出，解码逆序进行。
 		for i := len(encodings) - 1; i >= 0; i-- {
 			var err error
-			decoded, err = decodeContentEncodingWithMemory(decoded, encodings[i], maxSize, mem)
+			decoded, err = decodeContentEncodingWithMemory(decoded, encodings[i], limit, mem)
 			if err != nil {
 				if errors.Is(err, ErrRequestMemoryBudget) {
 					rejectRequestMemory(c)
@@ -191,9 +201,9 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 				if errors.Is(err, errDecompressedBodyTooLarge) {
 					var sizeErr *decompressedSizeError
 					if errors.As(err, &sizeErr) {
-						rejectRequestSize(c, maxSize, sizeErr.observed, sizeErr.stage, sizeErr.observed >= 0)
+						rejectRequestSize(c, limit, sizeErr.observed, sizeErr.stage, sizeErr.observed >= 0)
 					} else {
-						rejectRequestSize(c, maxSize, -1, "decompressed_body", false)
+						rejectRequestSize(c, limit, -1, "decompressed_body", false)
 					}
 				} else {
 					c.JSON(http.StatusBadRequest, gin.H{
