@@ -895,7 +895,11 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 		}
 		return responseCacheLookupResult{Kind: responseCacheLookupMiss}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	readTimeout := 500 * time.Millisecond
+	if cache.IsDurableResponseContextCache(runtimeCache) && !runtimeCache.SharedAcrossInstances() {
+		readTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
 	backendResult, err := readResponseContextBackend(ctx, runtimeCache, storeKey, config)
 	if err != nil {

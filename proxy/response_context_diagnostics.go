@@ -3,6 +3,7 @@ package proxy
 import (
 	"log"
 
+	"github.com/codex2api/cache"
 	"github.com/gin-gonic/gin"
 )
 
@@ -70,6 +71,9 @@ func logResponseContextUnavailable(c *gin.Context, status int, reason string, pr
 	backend := "none"
 	if respCache.runtimeCache != nil {
 		backend = respCache.runtimeCache.Driver()
+		if cache.IsDurableResponseContextCache(respCache.runtimeCache) {
+			backend += "+durable"
+		}
 	}
 	respCache.mu.RUnlock()
 	log.Printf("[response-context] unavailable status=%d reason=%s lookup=%s source=%s previous_response_id=%s api_key_id=%d path=%s l1_entries=%d l1_bytes=%d byte_evictions=%d oversize_rejections=%d backend=%s",

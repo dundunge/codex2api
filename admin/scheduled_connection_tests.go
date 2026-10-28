@@ -223,10 +223,27 @@ func (h *Handler) StartScheduledConnectionTests(ctx context.Context) {
 					return
 				case <-timer.C:
 				}
-				h.runScheduledConnectionTests(ctx, time.Now())
+				h.dispatchScheduledConnectionTests(ctx, time.Now())
 			}
 		}()
 	})
+}
+
+// The minute loop remains alive while dispatch adds workers to the wait group.
+// Slow batches must not delay claiming the next minute's scheduled slots.
+func (h *Handler) dispatchScheduledConnectionTests(ctx context.Context, now time.Time) {
+	h.scheduledTestWG.Add(1)
+	go func() {
+		defer h.scheduledTestWG.Done()
+		h.runScheduledConnectionTests(ctx, now)
+	}()
+}
+
+func (h *Handler) scheduledConnectionTestGate() chan struct{} {
+	h.scheduledTestGateOnce.Do(func() {
+		h.scheduledTestGate = make(chan struct{}, 4)
+	})
+	return h.scheduledTestGate
 }
 
 func (h *Handler) WaitScheduledConnectionTests() {
@@ -247,8 +264,8 @@ func (h *Handler) runScheduledConnectionTests(ctx context.Context, now time.Time
 		log.Printf("[scheduled-test] 读取计划失败: %v", err)
 		return
 	}
-	// Concurrency is bounded; each slot is still claimed before its single attempt.
-	gate := make(chan struct{}, 4)
+	// Bound concurrency across overlapping minute batches, not just within one.
+	gate := h.scheduledConnectionTestGate()
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for _, plan := range plans {

@@ -354,7 +354,7 @@
   "accounts": {
     "activationTitle": "定時啟用",
     "activationEnabled": "啟用定時測試",
-    "activationTimezone": "时区：Asia/Shanghai（北京时间）",
+    "activationTimezone": "時區：Asia/Shanghai（北京時間）",
     "activationSaved": "定時測試計畫已儲存",
     "activationUnsaved": "有未儲存的修改",
     "activationSaveHint": "儲存後依計畫自動執行",
@@ -363,7 +363,7 @@
     "activationAdd": "新增",
     "activationRemove": "刪除 {{time}}",
     "activationNoTimes": "尚未新增時間點",
-    "activationExecutionHint": "每个时间点使用当前账号、所选模型和测试内容发送一次请求，会消耗该账号额度。失败不重试、不换号；关闭页面后仍由服务器执行。停用账号或关闭开关后停止后续计划，错过的时间点不补发。",
+    "activationExecutionHint": "每個時間點使用目前帳號、所選模型和測試內容傳送一次請求，會消耗該帳號額度。失敗不重試、不換號；關閉頁面後仍由伺服器執行。停用帳號或關閉開關後停止後續計畫，錯過的時間點不補發。",
     "activationRecords": "最近執行記錄",
     "activationNoRecords": "尚無執行記錄；儲存計畫不會立即傳送請求。",
     "activationReset": "下次 5 小時重設",

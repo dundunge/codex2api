@@ -384,11 +384,16 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 		}
 		var candidates []map[string]json.RawMessage
 		eligible := 0
+		websocketEligible := accountFilterForResponsesWebSocket(slug)
+		allWebsocketEligible := true
 		for _, account := range accounts {
 			if !filter(account) {
 				continue
 			}
 			eligible++
+			if !websocketEligible(account) {
+				allWebsocketEligible = false
+			}
 			target := slug
 			if mapped, ok := resolveAccountModelMapping(account, slug); ok {
 				target = mapped
@@ -431,6 +436,11 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 			candidates = append(candidates, live)
 		}
 		effective := intersectCodexCapabilities(candidates)
+		// Unknown observations cannot widen the transports actually available
+		// to this key. HTTP-only relays never learn a capability snapshot.
+		if !allWebsocketEligible {
+			effective["prefer_websockets"] = json.RawMessage("false")
+		}
 		for name, kind := range codexCapabilityKinds {
 			value := effective[name]
 			if len(value) == 0 || bytes.Equal(value, []byte("null")) {

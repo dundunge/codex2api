@@ -189,6 +189,8 @@ type Handler struct {
 	autoActivate5hWG               sync.WaitGroup
 	scheduledTestStartOnce         sync.Once
 	scheduledTestWG                sync.WaitGroup
+	scheduledTestGateOnce          sync.Once
+	scheduledTestGate              chan struct{}
 	resetCreditPostMu              sync.Mutex
 	resetCreditPostWG              sync.WaitGroup
 	resetCreditPostCtx             context.Context

@@ -13,6 +13,15 @@ import (
 // rejectRequestSize runs before access/usage logging and must not log bodies,
 // authorization, query strings, or client-supplied URLs.
 func rejectRequestSize(c *gin.Context, limit, observed int64, stage string, lowerBound bool) {
+	var observedBytes, declaredLength *int64
+	if observed >= 0 {
+		observedBytes = &observed
+	} else {
+		lowerBound = false
+	}
+	if c.Request.ContentLength >= 0 {
+		declaredLength = &c.Request.ContentLength
+	}
 	requestID := boundedSizeMetadata(c.Writer.Header().Get("X-Request-ID"))
 	encoding := strings.Join(parseContentEncodings(c.GetHeader("Content-Encoding")), ",")
 	if encoding == "" {
@@ -32,16 +41,18 @@ func rejectRequestSize(c *gin.Context, limit, observed int64, stage string, lowe
 		Stage      string `json:"size_stage"`
 		Encoding   string `json:"content_encoding"`
 		Limit      int64  `json:"max_body_bytes"`
-		Observed   int64  `json:"observed_body_bytes"`
+		Observed   *int64 `json:"observed_body_bytes"`
+		Declared   *int64 `json:"declared_content_length,omitempty"`
 		LowerBound bool   `json:"observed_is_lower_bound"`
-	}{requestID, boundedSizeMetadata(c.GetHeader("CF-Ray")), c.FullPath(), stage, boundedSizeMetadata(encoding), limit, observed, lowerBound}
+	}{requestID, boundedSizeMetadata(c.GetHeader("CF-Ray")), c.FullPath(), stage, boundedSizeMetadata(encoding), limit, observedBytes, declaredLength, lowerBound}
 	encoded, _ := json.Marshal(entry)
 	log.Printf("[request-size] %s", encoded)
 	c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": gin.H{
 		"message": fmt.Sprintf("请求体过大（上限 %d 字节；请缩短会话或减少附件后重试）", limit),
 		"type":    "invalid_request_error", "code": "request_too_large",
 		"request_id": requestID, "max_body_bytes": limit,
-		"observed_body_bytes": observed, "size_stage": stage,
+		"observed_body_bytes": observedBytes, "size_stage": stage,
+		"declared_content_length": declaredLength,
 		"observed_is_lower_bound": lowerBound,
 	}})
 }

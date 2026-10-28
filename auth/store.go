@@ -2006,7 +2006,7 @@ func (a *Account) usageWindowCooldownLocked() bool {
 	switch a.CooldownReason {
 	case premium5hCooldownReason:
 		return true
-	case "rate_limited":
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 	default:
 		return false
 	}

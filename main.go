@@ -460,10 +460,7 @@ func main() {
 	if security.MaxImportBodySize < int64(security.MaxRequestBodySize) {
 		security.MaxImportBodySize = int64(security.MaxRequestBodySize)
 	}
-	r.Use(security.RequestSizeLimiter(int64(security.MaxRequestBodySize)))
-	r.Use(security.RequestBodyDecompressor(int64(security.MaxRequestBodySize)))
-	r.Use(api.BodyCacheMiddleware())
-	r.Use(api.CORSMiddleware())
+	configureRequestBodyMiddleware(r, int64(security.MaxRequestBodySize))
 	r.Use(api.SecurityHeadersMiddleware())
 	r.Use(loggerMiddleware())
 	r.Use(security.SecurityHeadersMiddleware())

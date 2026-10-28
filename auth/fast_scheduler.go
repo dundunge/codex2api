@@ -620,9 +620,6 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 	windowSize := fastSchedulerCandidateWindow
 	resetFirst := s.schedulerMode == SchedulerModeReset5hFirst && policy != DispatchPolicySpark &&
 		!bucket[rangeStart].reset5hAt.IsZero()
-	if resetFirst {
-		windowSize = 1 // preserve deadline order ahead of occupancy comparisons
-	}
 	if affinityHash != nil {
 		start = int(*affinityHash % uint64(rangeLen))
 		windowSize = 1 // retain deterministic affinity order
@@ -678,6 +675,9 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 			for j := i; j > 0; j-- {
 				a, b := candidates[j], candidates[j-1]
 				less := a.occupied < b.occupied
+				if resetFirst && !a.reset5hAt.Equal(b.reset5hAt) {
+					less = compareReset5hDeadlines(a.reset5hAt, b.reset5hAt) < 0
+				}
 				if quotaMode && a.usage != b.usage {
 					less = a.usage < b.usage
 					if s.schedulerMode == "fill_first" {
